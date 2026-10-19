@@ -83,6 +83,14 @@ FULL_BENCHMARK_TRIGGER_FILES = {
 # Some existing tests do not follow the source-stem naming convention, so keep
 # a small explicit map here to avoid missing those tests.
 EXPLICIT_SOURCE_TO_TESTS = {
+    "src/flaggems_vllm/ops/moe_align_block_size.py": [
+        "tests/test_moe_align_block_size.py",
+        "tests/test_moe_align_small_routes.py",
+    ],
+    "src/flaggems_vllm/ops/grouped_topk.py": [
+        "tests/test_grouped_topk.py",
+        "tests/test_grouped_topk_materialization.py",
+    ],
     "src/flaggems_vllm/ops/flash_mla_with_kvcache.py": [
         "tests/test_flash_mla_with_kvcache.py",
         "tests/test_flash_mla_backend.py",
@@ -137,6 +145,10 @@ EXPLICIT_SOURCE_TO_TESTS = {
 
 # Same for benchmarks: keep explicit entries only for non-standard names that cannot be inferred from the source stem.
 EXPLICIT_SOURCE_TO_BENCHMARKS = {
+    "src/flaggems_vllm/ops/grouped_topk.py": [
+        "benchmark/test_grouped_topk.py",
+        "benchmark/test_grouped_topk_materialization_perf.py",
+    ],
     "src/flaggems_vllm/runtime/backend/_nvidia/hopper/ops/w8a8_block_fp8_bmm.py": [
         "benchmark/test_fp8_einsum.py",
     ],
@@ -167,6 +179,7 @@ EXPLICIT_SOURCE_TO_BENCHMARKS = {
     ],
     "src/flaggems_vllm/ops/moe_align_block_size.py": [
         "benchmark/test_moe_align_block_size_triton.py",
+        "benchmark/test_moe_align_small_routes_perf.py",
     ],
     "src/flaggems_vllm/ops/FLA/chunk_delta_h.py": [
         "benchmark/test_FLA/test_chunk_gated_delta_rule_perf.py",
