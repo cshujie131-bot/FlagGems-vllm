@@ -19,11 +19,16 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm.utils import pointwise_dynamic
+from dataclasses import replace
+from flaggems_vllm.utils.codegen_config_utils import get_codegen_config
+
+# Operator-local MetaX tile tuning; do not mutate the global pointwise policy.
+_DSV4_SILU_CONFIG = replace(get_codegen_config(), max_tile_size=1024)
 
 logger = logging.getLogger(__name__)
 
 
-@pointwise_dynamic(promotion_methods=[(0, 1, 2, "DEFAULT")])
+@pointwise_dynamic(promotion_methods=[(0, 1, 2, "DEFAULT")], config=_DSV4_SILU_CONFIG)
 @triton.jit
 def silu_and_mul_with_clamp_kernel(x, y, limit):
     x_fp32 = x.to(tl.float32)

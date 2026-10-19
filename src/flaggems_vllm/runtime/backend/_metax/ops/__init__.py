@@ -47,3 +47,6 @@ __all__ = [
     "inplace_fused_experts",
     "outplace_fused_experts",
 ]
+
+from .mhc_pre import mhc_pre
+__all__.append("mhc_pre")

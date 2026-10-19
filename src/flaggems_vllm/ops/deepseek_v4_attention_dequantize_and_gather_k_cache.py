@@ -29,9 +29,16 @@ def _as_cache_2d(k_cache: torch.Tensor) -> torch.Tensor:
     if k_cache.ndim == 2:
         return k_cache
     if k_cache.ndim == 3:
-        if k_cache.is_contiguous():
-            return k_cache.view(k_cache.shape[0], -1)
-        return k_cache.contiguous().view(k_cache.shape[0], -1)
+        # Graph-safe copy elimination prototype: the Triton kernel uses only the
+        # base pointer plus cache_block_stride=stride(0) and token_data_size for
+        # address generation.  A MODEL1 cache shaped [num_blocks, block, 584]
+        # may have block padding (e.g. stride0=37440 vs 64*584=37376); cloning
+        # it to a contiguous 2D view creates the observed rank-3 copy.  Passing
+        # the original 3D tensor is semantically equivalent as long as stride(1)
+        # is token-contiguous and stride(2)==1.
+        if k_cache.stride(-1) != 1:
+            raise ValueError(f"unsupported k_cache stride={tuple(k_cache.stride())}")
+        return k_cache
     raise ValueError(f"k_cache must be 2D or 3D, got shape={tuple(k_cache.shape)}")
 
 
@@ -55,7 +62,6 @@ def _dequantize_and_gather_k_cache_kernel(
     cache_block_stride: tl.constexpr,
     output_dim: tl.constexpr,
     num_workers: tl.constexpr,
-    n_quant_blocks: tl.constexpr,
     HAVE_GATHER_LENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -83,29 +89,10 @@ def _dequantize_and_gather_k_cache_kernel(
         )
         out_row = out_ptr + req_idx * out_stride0 + (offset + local_i) * out_stride1
 
-        if nope_dim % quant_block == 0:
-            for qblock in tl.static_range(0, n_quant_blocks):
-                qoffs = qblock * quant_block + tl.arange(0, quant_block)
-                x_u8 = tl.load(token_data + qoffs)
-                x_fp8 = x_u8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-                encoded = tl.load(scale_base + qblock)
-                scale = tl.exp2(encoded.to(tl.float32) - 127.0)
-                x = x_fp8 * scale
-                tl.store(out_row + qoffs, x.to(tl.bfloat16))
-        else:
-            for qblock in tl.static_range(0, n_quant_blocks - 1):
-                qoffs = qblock * quant_block + tl.arange(0, quant_block)
-                x_u8 = tl.load(token_data + qoffs)
-                x_fp8 = x_u8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-                encoded = tl.load(scale_base + qblock)
-                scale = tl.exp2(encoded.to(tl.float32) - 127.0)
-                x = x_fp8 * scale
-                tl.store(out_row + qoffs, x.to(tl.bfloat16))
-
-            qblock = n_quant_blocks - 1
+        for qblock in tl.static_range(0, scale_slots):
             qoffs = qblock * quant_block + tl.arange(0, quant_block)
             qmask = qoffs < nope_dim
-            x_u8 = tl.load(token_data + qoffs, mask=qmask, other=0)
+            x_u8 = tl.load(token_data + qoffs, mask=qmask, other=0).to(tl.uint8)
             x_fp8 = x_u8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
             encoded = tl.load(scale_base + qblock)
             scale = tl.exp2(encoded.to(tl.float32) - 127.0)
@@ -113,8 +100,8 @@ def _dequantize_and_gather_k_cache_kernel(
             tl.store(out_row + qoffs, x.to(tl.bfloat16), mask=qmask)
 
         bf16_ptr = (token_data + nope_dim).to(tl.pointer_type(tl.bfloat16))
-        for rblock in tl.static_range(0, rope_dim, 64):
-            roffs = rblock + tl.arange(0, 64)
+        for rblock in tl.static_range(0, rope_dim, 16):
+            roffs = rblock + tl.arange(0, 16)
             rmask = roffs < rope_dim
             vals = tl.load(bf16_ptr + roffs, mask=rmask, other=0.0)
             tl.store(out_row + nope_dim + roffs, vals, mask=rmask)
@@ -140,9 +127,8 @@ def dequantize_and_gather_k_cache(
         nope_dim = output_dim - rope_dim
     if scale_slots is None:
         scale_slots = _default_scale_slots(nope_dim)
-
-    n_quant_blocks = triton.cdiv(nope_dim, 64)
     assert nope_dim + rope_dim <= output_dim
+
     k_cache_2d = _as_cache_2d(k_cache)
     token_data_size = nope_dim + rope_dim * 2
     num_reqs = seq_lens.shape[0]
@@ -167,7 +153,6 @@ def dequantize_and_gather_k_cache(
             cache_block_stride=k_cache_2d.stride(0),
             output_dim=output_dim,
             num_workers=num_workers,
-            n_quant_blocks=n_quant_blocks,
             HAVE_GATHER_LENS=gather_lens is not None,
         )
 

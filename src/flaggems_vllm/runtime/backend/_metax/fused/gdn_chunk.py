@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 
 import torch
 import triton
@@ -25,6 +26,7 @@ from flaggems_vllm.ops.FLA.utils import SUPPRESS_LEVEL, tensor_cache
 from flaggems_vllm.ops.FLA.wy_fast import recompute_w_u_fwd
 from flaggems_vllm.utils import libentry, libtuner
 
+
 _original_compile = backend.metax.translate_llvmir_to_mcfatbin
 
 
@@ -36,7 +38,9 @@ def _compile_without_licm(src, mxcc, maca, options):
     return _original_compile(src, mxcc, maca, options)
 
 
-backend.metax.translate_llvmir_to_mcfatbin = _compile_without_licm
+def enable_process_wide_licm_workaround():
+    """Legacy opt-in. Importing the operator library must not patch the compiler."""
+    backend.metax.translate_llvmir_to_mcfatbin = _compile_without_licm
 
 logger = logging.getLogger(__name__)
 
