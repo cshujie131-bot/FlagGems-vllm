@@ -23,6 +23,9 @@ from flaggems_vllm.runtime.backend._metax.ops.fused_moe import (
 from flaggems_vllm.runtime.backend._metax.ops.hyperconnection import (
     qwen4_hc_inject_combine,
 )
+from flaggems_vllm.runtime.backend._metax.ops.moe_align_block_size import (
+    moe_align_block_size_no_tle,
+)
 from flaggems_vllm.runtime.backend._metax.ops.per_token_group_quant_fp8 import (
     SUPPORTED_FP8_DTYPE,
     per_token_group_quant_fp8,
@@ -43,10 +46,12 @@ __all__ = [
     "qwen4_qsa_mqa_paged_dot",
     "qwen4_compress_norm_mrope_store_groups",
     "scaled_int8_quant",
+    "moe_align_block_size_no_tle",
     "fused_experts_impl",
     "inplace_fused_experts",
     "outplace_fused_experts",
 ]
 
 from .mhc_pre import mhc_pre
+
 __all__.append("mhc_pre")
