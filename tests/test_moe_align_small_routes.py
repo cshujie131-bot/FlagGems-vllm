@@ -45,8 +45,11 @@ def test_small_route_full_buffers(m, dtype, pattern):
         ids = torch.randint(0, 1024, (m, 16))
     ids = ids.to(dtype).cuda()
     expected = _expected(ids)
-    actual = moe_align_block_size_no_tle(ids, 16, 1024)
-    assert all(torch.equal(a.cpu(), b) for a, b in zip(actual, expected))
+    for pad_sorted_ids in (False, True):
+        actual = moe_align_block_size_no_tle(
+            ids, 16, 1024, pad_sorted_ids=pad_sorted_ids
+        )
+        assert all(torch.equal(a.cpu(), b) for a, b in zip(actual, expected))
 
 
 def test_small_route_changing_graph_last_bin():
@@ -67,3 +70,15 @@ def test_small_route_changing_graph_last_bin():
         graph.replay()
         expected = _expected(ids)
         assert all(torch.equal(a.cpu(), b) for a, b in zip(output, expected))
+
+
+def test_caller_workspace_retains_native_fallback():
+    torch.manual_seed(710)
+    ids = torch.randint(0, 1024, (12, 16), dtype=torch.int32, device="cuda")
+    workspace = (
+        torch.zeros(1025, dtype=torch.int32, device="cuda"),
+        torch.zeros(1025, 1024, dtype=torch.int32, device="cuda"),
+    )
+    expected = _expected(ids)
+    actual = moe_align_block_size_no_tle(ids, 16, 1024, workspace=workspace)
+    assert all(torch.equal(a.cpu(), b) for a, b in zip(actual, expected))
