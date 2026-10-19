@@ -10,6 +10,7 @@ import json
 import statistics
 import time
 
+import pytest
 import torch
 
 from flaggems_vllm import runtime
@@ -72,6 +73,13 @@ def main():
             results.append(row)
             print(json.dumps(row), flush=True)
     print(json.dumps({"complete": True, "rows": results}), flush=True)
+
+
+@pytest.mark.skipif(
+    runtime.device.vendor_name != "metax", reason="MetaX performance path"
+)
+def test_complete_operator_benchmark():
+    main()
 
 
 if __name__ == "__main__":
