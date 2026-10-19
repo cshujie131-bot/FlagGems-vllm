@@ -11,8 +11,10 @@ import json
 import statistics
 import time
 
+import pytest
 import torch
 
+from flaggems_vllm import runtime
 from flaggems_vllm.ops.moe_align_block_size import moe_align_block_size_no_tle
 
 
@@ -57,6 +59,13 @@ def main():
         rows.append(row)
         print(json.dumps(row), flush=True)
     print(json.dumps({"complete": True, "rows": rows}), flush=True)
+
+
+@pytest.mark.skipif(
+    runtime.device.vendor_name != "metax", reason="MetaX performance path"
+)
+def test_complete_operator_benchmark():
+    main()
 
 
 if __name__ == "__main__":

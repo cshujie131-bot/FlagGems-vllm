@@ -969,18 +969,19 @@ def moe_align_block_size_no_tle(
     ``workspace`` optionally supplies zero-initialized int32 cumsum/count buffers
     of sizes E+1 and (E+1)*E, allowing callers to initialize them without Torch.
     """
-    if _small_routes_eligible(topk_ids, block_size, num_experts, expert_map, workspace):
+    num_routes = topk_ids.numel()
+    if 32 <= num_routes <= 1024 and _small_routes_eligible(
+        topk_ids, block_size, num_experts, expert_map, workspace
+    ):
         return _align_small_routes(topk_ids, block_size, num_experts, pad_sorted_ids)
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    max_num_tokens_padded = num_routes + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    if topk_ids.numel() < num_experts:
+    if num_routes < num_experts:
         # Small-batch tightening (same as vLLM): otherwise the
         # (numel + E*(block_size-1)) bound inflates the sorted/expert buffers
         # and the per-block masks of stage1/stage4.
-        max_num_tokens_padded = min(
-            topk_ids.numel() * block_size, max_num_tokens_padded
-        )
+        max_num_tokens_padded = min(num_routes * block_size, max_num_tokens_padded)
     sorted_ids = torch.empty(
         (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
     )
