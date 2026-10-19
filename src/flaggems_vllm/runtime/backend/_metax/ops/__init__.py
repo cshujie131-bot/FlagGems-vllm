@@ -30,11 +30,18 @@ from flaggems_vllm.runtime.backend._metax.ops.per_token_group_quant_fp8 import (
     SUPPORTED_FP8_DTYPE,
     per_token_group_quant_fp8,
 )
-from flaggems_vllm.runtime.backend._metax.ops.persistent_topk import persistent_topk
 from flaggems_vllm.runtime.backend._metax.ops.ple_state import ple_state_scatter_
 from flaggems_vllm.runtime.backend._metax.ops.qsa import qwen4_store_qsa_kv_rows
 from flaggems_vllm.runtime.backend._metax.ops.qsa_mqa import qwen4_qsa_mqa_paged_dot
 from flaggems_vllm.runtime.backend._metax.ops.scaled_int8_quant import scaled_int8_quant
+from flaggems_vllm.utils import triton_version_utils
+
+# Backport the optional-TLE guard: one unsupported optional op must not hide
+# independent MetaX operators (including mhc_pre and MoE alignment).
+if triton_version_utils.has_triton_tle():
+    from flaggems_vllm.runtime.backend._metax.ops.persistent_topk import persistent_topk
+else:
+    from flaggems_vllm.ops.persistent_topk import persistent_topk
 
 __all__ = [
     "SUPPORTED_FP8_DTYPE",
