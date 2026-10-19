@@ -11,6 +11,7 @@ import statistics
 import time
 
 import flag_gems
+import pytest
 import torch
 
 from flaggems_vllm import runtime, situ_and_mul
@@ -88,6 +89,13 @@ def main():
             rows.append(row)
             print(json.dumps(row), flush=True)
     print(json.dumps({"complete": True, "rows": rows}), flush=True)
+
+
+@pytest.mark.skipif(
+    runtime.device.vendor_name != "metax", reason="MetaX performance path"
+)
+def test_complete_operator_benchmark():
+    main()
 
 
 if __name__ == "__main__":
