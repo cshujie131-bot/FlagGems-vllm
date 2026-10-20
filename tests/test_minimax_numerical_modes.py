@@ -333,3 +333,67 @@ def test_numerical_mode_changed_input_graph(kind):
         torch.cuda.synchronize()
         for result, reference in zip(actual, expected):
             assert torch.equal(result, reference)
+
+
+@pytest.mark.parametrize("kind", ["gemma", "swiglu"])
+@pytest.mark.parametrize("m", [1, 64, 8192])
+def test_disjoint_shared_workspace(kind, m):
+    """vLLM workspaces can be disjoint slices of one allocator-owned storage."""
+    torch.manual_seed(562)
+    n = 6144 if kind == "gemma" else 384
+    out_n = n if kind == "gemma" else n // 2
+    left_size, right_size = m * n, m * out_n
+    arena = torch.empty(
+        left_size + 64 + right_size, device="cuda", dtype=torch.bfloat16
+    )
+    x = arena[:left_size].view(m, n)
+    other = arena[left_size + 64 :].view(m, out_n)
+    guard = arena[left_size : left_size + 64]
+    guard.fill_(1.625)
+    weight = torch.randn(n, device="cuda", dtype=x.dtype) * 0.2
+
+    def reset():
+        x.normal_()
+        other.normal_()
+        a, b = x.cpu().float(), other.cpu().float()
+        if kind == "gemma":
+            added = a + b
+            expected = added * torch.rsqrt(added.square().mean(-1, keepdim=True) + 1e-6)
+            return expected * (1 + weight.cpu().float()), added.bfloat16()
+        gate, up = a.chunk(2, -1)
+        gate, up = gate.clamp(max=7), up.clamp(-7, 7)
+        return gate / (1 + torch.exp(-1.702 * gate)) * (up + 1), None
+
+    def operation():
+        if kind == "gemma":
+            fgv.fused_add_rms_norm(x, other, (n,), weight, 1e-6, gemma=True)
+        else:
+            apply_moe_activation(
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+                other,
+                x,
+                gemm1_alpha=1.702,
+                gemm1_beta=1.0,
+                gemm1_clamp_limit=7.0,
+                sigmoid_mode="division",
+            )
+
+    def check(reference):
+        expected, residual = reference
+        assert_fp32(x if kind == "gemma" else other, expected)
+        if residual is not None:
+            assert torch.equal(other.cpu(), residual)
+        assert torch.equal(guard, torch.full_like(guard, 1.625))
+
+    assert x.untyped_storage().data_ptr() == other.untyped_storage().data_ptr()
+    expected = reset()
+    operation()
+    check(expected)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        operation()
+    expected = reset()
+    graph.replay()
+    torch.cuda.synchronize()
+    check(expected)
