@@ -14,6 +14,8 @@
 
 import functools
 import logging
+import math
+import numbers
 import os
 from enum import Enum
 from typing import Any, Optional
@@ -23,11 +25,10 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 import yaml
-
 from flaggems_vllm.ops.moe_align_block_size import moe_align_block_size
 from flaggems_vllm.ops.moe_sum import moe_sum
 from flaggems_vllm.runtime import device, torch_device_fn
-from flaggems_vllm.utils import pointwise_dynamic
+from flaggems_vllm.utils import libentry, pointwise_dynamic
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +544,7 @@ class MoEActivation(Enum):
     GELU = "gelu"
     RELU2 = "relu2"
     SWIGLUOAI = "swigluoai"
+    SWIGLUOAI_UNINTERLEAVE = "swigluoai_uninterleave"
     SWIGLUSTEP = "swiglustep"
 
     # Non-gated: input [..., d] -> output [..., d]
@@ -577,12 +579,122 @@ class MoEActivation(Enum):
         return N if not activation.is_gated else N // 2
 
 
+def _validate_swigluoai_uninterleave_params(
+    gemm1_alpha: float | None,
+    gemm1_beta: float | None,
+    gemm1_clamp_limit: float | None,
+) -> tuple[float, float, float]:
+    """Validate the scalar gate parameters before launching an MoE kernel."""
+    params = {
+        "gemm1_alpha": gemm1_alpha,
+        "gemm1_beta": gemm1_beta,
+        "gemm1_clamp_limit": gemm1_clamp_limit,
+    }
+    validated = {}
+    for name, value in params.items():
+        if not isinstance(value, numbers.Real) or isinstance(value, bool):
+            raise ValueError(
+                f"swigluoai_uninterleave requires a finite scalar {name}, got {value!r}"
+            )
+        try:
+            converted = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"swigluoai_uninterleave requires a finite scalar {name}, got {value!r}"
+            ) from exc
+        if not math.isfinite(converted):
+            raise ValueError(
+                f"swigluoai_uninterleave requires a finite scalar {name}, got {value!r}"
+            )
+        validated[name] = converted
+    if validated["gemm1_clamp_limit"] < 0:
+        raise ValueError("swigluoai_uninterleave requires gemm1_clamp_limit >= 0")
+    return (
+        validated["gemm1_alpha"],
+        validated["gemm1_beta"],
+        validated["gemm1_clamp_limit"],
+    )
+
+
+@triton.jit
+def _swigluoai_uninterleave_kernel(
+    input_ptr,
+    output_ptr,
+    n_inter,
+    stride_im,
+    stride_in,
+    stride_om,
+    stride_on,
+    alpha,
+    beta,
+    clamp_limit,
+    BLOCK_I: tl.constexpr,
+):
+    """Split gate/up layout; compute in FP32 and round on output store."""
+    row = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK_I + tl.arange(0, BLOCK_I)
+    mask = cols < n_inter
+    gate = tl.load(
+        input_ptr + row * stride_im + cols * stride_in, mask=mask, other=0.0
+    ).to(tl.float32)
+    up = tl.load(
+        input_ptr + row * stride_im + (n_inter + cols) * stride_in,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    gate = tl.minimum(gate, clamp_limit)
+    up = tl.minimum(tl.maximum(up, -clamp_limit), clamp_limit)
+    activated = gate * tl.sigmoid(alpha * gate) * (up + beta)
+    tl.store(
+        output_ptr + row * stride_om + cols * stride_on,
+        activated.to(output_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
+@libentry()
+@triton.jit
+def _swigluoai_division_flat_kernel(
+    X,
+    Y,
+    N: tl.constexpr,
+    XS: tl.constexpr,
+    YS: tl.constexpr,
+    TOTAL: tl.constexpr,
+    ALPHA: tl.constexpr,
+    BETA: tl.constexpr,
+    LIMIT: tl.constexpr,
+    B: tl.constexpr,
+):
+    i = tl.program_id(0) * B + tl.arange(0, B)
+    row = i // N
+    col = i % N
+    gate = tl.minimum(tl.load(X + row * XS + col, i < TOTAL, 0).to(tl.float32), LIMIT)
+    up = tl.minimum(
+        tl.maximum(
+            tl.load(X + row * XS + N + col, i < TOTAL, 0).to(tl.float32), -LIMIT
+        ),
+        LIMIT,
+    )
+    value = gate / (1.0 + tl.exp(-ALPHA * gate)) * (up + BETA)
+    tl.store(Y + row * YS + col, value, i < TOTAL)
+
+
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
     input: torch.Tensor,
+    *,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+    sigmoid_mode: str = "native",
 ) -> torch.Tensor:
     """Apply MoE activation (pure PyTorch / FlagGems Triton)."""
+    if sigmoid_mode not in ("native", "division"):
+        raise ValueError("Unknown sigmoid evaluation mode")
+    if sigmoid_mode != "native" and activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        raise NotImplementedError("Division mode is for split-layout clamped SwiGLU")
     assert input.dim() == 2, "Input must be 2D"
     assert output.dim() == 2, "Output must be 2D"
     if activation.is_gated:
@@ -600,6 +712,57 @@ def apply_moe_activation(
         N = output.size(-1)
         x, y = input[:, :N], input[:, N:]
         _silu_and_mul_kernel(x, y, out0=output)
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        alpha, beta, limit = _validate_swigluoai_uninterleave_params(
+            gemm1_alpha, gemm1_beta, gemm1_clamp_limit
+        )
+        assert input.dtype == output.dtype and input.device == output.device
+        assert input.size(0) == output.size(0)
+        if output.numel() == 0:
+            return output
+        if sigmoid_mode == "division":
+            if input.device.type != "cuda" or input.dtype not in (
+                torch.bfloat16,
+                torch.float16,
+                torch.float32,
+            ):
+                raise NotImplementedError("Division mode requires CUDA BF16/FP16/FP32")
+            if input.stride(-1) != 1 or output.stride(-1) != 1:
+                raise NotImplementedError("Division mode requires unit column strides")
+            if torch._C._overlaps(input, output):
+                raise ValueError("Input and output must not alias")
+            if output.numel() >= 2**31:
+                raise NotImplementedError("Division mode index range exceeded")
+            _swigluoai_division_flat_kernel[(triton.cdiv(output.numel(), 256),)](
+                input,
+                output,
+                output.size(1),
+                input.stride(0),
+                output.stride(0),
+                output.numel(),
+                alpha,
+                beta,
+                limit,
+                256,
+                num_warps=4,
+            )
+            return output
+        block_i = 256
+        _swigluoai_uninterleave_kernel[
+            (output.size(0), triton.cdiv(output.size(1), block_i))
+        ](
+            input,
+            output,
+            output.size(1),
+            input.stride(0),
+            input.stride(1),
+            output.stride(0),
+            output.stride(1),
+            alpha,
+            beta,
+            limit,
+            BLOCK_I=block_i,
+        )
     elif activation == MoEActivation.GELU:
         N = output.size(-1)
         gate, up = input[:, :N], input[:, N:]

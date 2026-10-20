@@ -154,7 +154,15 @@ from flaggems_vllm.ops.weight_norm import weight_norm
 
 # isort: on
 
+
+from .fp32_router_gemm import fp32_router_gemm
+from .fused_minimax_m3_qknorm_rope_kv_insert import (
+    fused_minimax_m3_qknorm_rope_kv_insert,
+)
+
 __all__ = [
+    "fused_minimax_m3_qknorm_rope_kv_insert",
+    "fp32_router_gemm",
     "act_quant_triton",
     "add_rms_norm",
     "apply_repetition_penalties",
