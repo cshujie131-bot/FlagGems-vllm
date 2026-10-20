@@ -7,3 +7,5 @@ The public MiniMax cache-writer prerequisite and clamped-activation API come fro
 No model/TP policy, source-import machinery or private snapshots are added. FL owns headpack, sparse specialization, model shapes and guards. Existing no-TLE alignment, grouped_topk, rotary and other kernels are reused from the pinned base.
 
 Cache isolation: https://github.com/flagos-ai/FlagGems-vllm/pull/962, d1ea137a3b2d790968c5e81b7ad2be278f66e5ee (not merged), preserves the legacy environment fallback.
+
+Shared-workspace follow-up from FGV #961, b8c20da3c51fda25801535e3f71bbc3bf0bb9881: disjoint byte ranges in one storage are allowed; actual overlap stays rejected. Kernel arithmetic is unchanged.

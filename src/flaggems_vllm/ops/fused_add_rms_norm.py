@@ -18,6 +18,7 @@ import math
 import torch
 import triton
 import triton.language as tl
+from flaggems_vllm.ops._memory_overlap import tensor_ranges_overlap
 from flaggems_vllm.runtime import torch_device_fn
 from flaggems_vllm.utils import libentry
 from flaggems_vllm.utils import triton_lang_extension as ext
@@ -299,7 +300,7 @@ def _gemma_residual(x, residual, normalized_shape, weight, eps):
     a, r = matrix(x), matrix(residual)
     if not a.numel():
         return x, residual
-    if torch._C._overlaps(x, residual):
+    if tensor_ranges_overlap(x, residual):
         raise ValueError("Input and residual must not alias")
     with torch_device_fn.device(x.device):
         fused_add_rms_norm_kernel[(a.shape[0],)](

@@ -25,6 +25,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 import yaml
+from flaggems_vllm.ops._memory_overlap import tensor_ranges_overlap
 from flaggems_vllm.ops.moe_align_block_size import moe_align_block_size
 from flaggems_vllm.ops.moe_sum import moe_sum
 from flaggems_vllm.runtime import device, torch_device_fn
@@ -729,7 +730,7 @@ def apply_moe_activation(
                 raise NotImplementedError("Division mode requires CUDA BF16/FP16/FP32")
             if input.stride(-1) != 1 or output.stride(-1) != 1:
                 raise NotImplementedError("Division mode requires unit column strides")
-            if torch._C._overlaps(input, output):
+            if tensor_ranges_overlap(input, output):
                 raise ValueError("Input and output must not alias")
             if output.numel() >= 2**31:
                 raise NotImplementedError("Division mode index range exceeded")
