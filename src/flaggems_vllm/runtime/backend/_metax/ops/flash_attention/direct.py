@@ -14,6 +14,7 @@
 
 import logging
 
+import torch
 import triton
 import triton.language as tl
 
@@ -230,6 +231,10 @@ def flash_varlen_fwd_kernel(
     )
     bQ = tl.load(gQ.advance([m_block * BLOCK_M, 0]), boundary_check=(0, 1))
 
+    # Preserve IEEE products for FP32 encoder attention, including P @ V.
+    dot_precision: tl.constexpr = (
+        "ieee" if q_ptr.dtype.element_ty == tl.float32 else None
+    )
     acc_ = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
     rowmax_ = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     rowsum_ = tl.zeros([BLOCK_M], dtype=tl.float32)
@@ -290,7 +295,7 @@ def flash_varlen_fwd_kernel(
             bK = tl.load(gK, boundary_check=(0, 1))
             bK = tl.trans(bK)
             bV = tl.load(gV, boundary_check=(0, 1))
-        S = tl.dot(bQ, bK, out_dtype=tl.float32)
+        S = tl.dot(bQ, bK, out_dtype=tl.float32, input_precision=dot_precision)
         S = apply_softcap(S, softcap, is_softcap)
         S = apply_alibi(
             S,
@@ -343,7 +348,7 @@ def flash_varlen_fwd_kernel(
                 BLOCK_N=BLOCK_N,
             )
 
-        acc_ = tl.dot(P, bV, acc_)
+        acc_ = tl.dot(P, bV, acc_, input_precision=dot_precision)
         n_block -= 1
 
     for n_block in tl.range(
@@ -386,7 +391,7 @@ def flash_varlen_fwd_kernel(
             bK = tl.load(gK)
             bK = tl.trans(bK)
             bV = tl.load(gV)
-        S = tl.dot(bQ, bK, out_dtype=tl.float32)
+        S = tl.dot(bQ, bK, out_dtype=tl.float32, input_precision=dot_precision)
         S = apply_softcap(S, softcap, is_softcap)
         S = apply_alibi(
             S,
@@ -438,7 +443,7 @@ def flash_varlen_fwd_kernel(
                 BLOCK_M=BLOCK_M,
                 BLOCK_N=BLOCK_N,
             )
-        acc_ = tl.dot(P, bV, acc_)
+        acc_ = tl.dot(P, bV, acc_, input_precision=dot_precision)
 
     # LSE
     lse = tl.where(
@@ -567,6 +572,12 @@ def launch_direct(
             else cfg["num_stages"](args)
         ),
     }
+
+    if params.q_ptr.dtype == torch.float32 and head_size >= 128:
+        # Half-precision tiles can require 80--152 KiB with FP32 D128/D256.
+        # Bound the Q tile to 32 KiB and the KV tile to fit C550's 64 KiB limit.
+        cfg_params["BLOCK_M"] = min(cfg_params["BLOCK_M"], 8192 // head_size)
+        cfg_params["BLOCK_N"] = min(cfg_params["BLOCK_N"], 16)
 
     logger.debug("Running flash_varlen_fwd_kernel with config: %s", cfg_params)
     worklist_ptr = compact_worklist if use_compact_worklist else params.page_table_ptr
