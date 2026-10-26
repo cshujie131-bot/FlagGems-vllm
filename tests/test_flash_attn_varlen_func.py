@@ -601,3 +601,88 @@ def test_metax_fp32_document_isolation():
     torch.testing.assert_close(first[:17], second[:17], atol=0, rtol=0)
     torch.testing.assert_close(first_lse[:, :17], second_lse[:, :17], atol=0, rtol=0)
     assert not torch.equal(first[17:], second[17:])
+
+
+@pytest.mark.parametrize(
+    "head_size,length,self_attention,expected",
+    [
+        (64, 127, True, "mha_block_128"),
+        (64, 128, True, "mha_block_64"),
+        (64, 129, True, "mha_block_64"),
+        (64, 1024, True, "mha_block_64"),
+        (64, 1025, True, "mha_fp32_encoder_long"),
+        (64, 8192, True, "mha_fp32_encoder_long"),
+        (64, 4096, False, "mha_block_128"),
+        (32, 4096, True, "mha_block_128"),
+        (128, 4096, True, "mha_block_128"),
+        (256, 4096, True, "mha_block_128"),
+    ],
+)
+def test_metax_fp32_context_policy(head_size, length, self_attention, expected):
+    from flaggems_vllm.runtime.backend._metax.heuristics_config_utils import (
+        select_fp32_varlen_config,
+    )
+
+    assert (
+        select_fp32_varlen_config(
+            "mha_block_128",
+            head_size=head_size,
+            max_query_len=length,
+            self_attention=self_attention,
+        )
+        == expected
+    )
+
+
+@pytest.mark.flash_attn_varlen_func
+@pytest.mark.skipif(vendor_name != "metax", reason="MetaX FP32 context policy")
+@pytest.mark.parametrize("lengths", [[127], [128], [129], [1024], [4096], [2, 17, 129]])
+@pytest.mark.parametrize("heads", [1, 16])
+def test_metax_fp32_selected_context_path(monkeypatch, lengths, heads):
+    from flaggems_vllm.runtime.backend._metax.ops.flash_attention import direct
+
+    seen = []
+    original = direct.flash_varlen_fwd_kernel
+
+    class RecordLaunch:
+        def __getitem__(self, grid):
+            def call(*args, **kwargs):
+                args[3].fill_(float("nan"))
+                args[5].fill_(float("nan"))
+                result = original[grid](*args, **kwargs)
+                seen.append(kwargs)
+                return result
+
+            return call
+
+    monkeypatch.setattr(direct, "flash_varlen_fwd_kernel", RecordLaunch())
+    args = _metax_fp32_inputs(lengths, lengths, (heads, heads), 64, "packed")
+    args["cu_seqlens_k"] = args["cu_seqlens_q"]
+    out, lse = flaggems_vllm.flash_attn_varlen_func(**args)
+    ref, ref_lse = _metax_fp32_oracle(
+        args["q"], args["k"], args["v"], lengths, lengths, 0.125
+    )
+    torch.testing.assert_close(out.cpu().double(), ref, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(lse.cpu().double(), ref_lse, atol=2e-5, rtol=2e-5)
+    assert len(seen) == 1
+    if max(lengths) >= 128:
+        assert (
+            seen[0]["BLOCK_M"],
+            seen[0]["BLOCK_N"],
+            seen[0]["num_warps"],
+            seen[0]["num_stages"],
+        ) == ((64, 16, 4, 2) if max(lengths) > 1024 and heads == 16 else (64, 32, 4, 1))
+
+
+@pytest.mark.parametrize("default", ["mha_block_16", "mha_block_32", "mha_block_64"])
+def test_metax_fp32_long_preserves_other_native_profiles(default):
+    from flaggems_vllm.runtime.backend._metax.heuristics_config_utils import (
+        select_fp32_varlen_config,
+    )
+
+    assert (
+        select_fp32_varlen_config(
+            default, head_size=64, max_query_len=4096, self_attention=True
+        )
+        == default
+    )

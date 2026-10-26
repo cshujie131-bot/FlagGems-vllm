@@ -29,6 +29,9 @@ from flaggems_vllm.ops.flash_kernel import (
     softmax_rescale,
 )
 from flaggems_vllm.runtime import torch_device_fn
+from flaggems_vllm.runtime.backend._metax.heuristics_config_utils import (
+    select_fp32_varlen_config,
+)
 from flaggems_vllm.runtime.backend._metax.ops.flash_attention.common import (
     compact_ragged_tile_coords,
     online_softmax_stats,
@@ -544,6 +547,24 @@ def launch_direct(
     if flaggems_vllm.vendor_name == "mthreads":
         varlen_fwd_config_str = "mha_block_32"
 
+    if (
+        params.q_ptr.dtype == torch.float32
+        and not is_paged
+        and not use_compact_worklist
+    ):
+        varlen_fwd_config_str = select_fp32_varlen_config(
+            varlen_fwd_config_str,
+            head_size=head_size,
+            max_query_len=max_seqlen_q,
+            self_attention=(
+                params.is_cu_seqlens_q
+                and params.is_cu_seqlens_k
+                and params.cu_seqlens_q_ptr is params.cu_seqlens_k_ptr
+                and params.h == params.hk
+                and params.seqlen_q == params.seqlen_k
+            ),
+        )
+
     cfg = runtime.get_heuristic_config(varlen_fwd_config_str)
     use_c550_paged_d128_block128 = (
         is_paged and head_size == 128 and varlen_fwd_config_str == "mha_block_128"
@@ -572,6 +593,9 @@ def launch_direct(
             else cfg["num_stages"](args)
         ),
     }
+
+    if varlen_fwd_config_str.startswith("mha_fp32_"):
+        cfg_params["num_stages"] = cfg["num_stages"](args)
 
     if params.q_ptr.dtype == torch.float32 and head_size >= 128:
         # Half-precision tiles can require 80--152 KiB with FP32 D128/D256.
