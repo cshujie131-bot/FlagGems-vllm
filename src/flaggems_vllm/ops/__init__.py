@@ -208,6 +208,7 @@ from flaggems_vllm.ops.mhc_with_norm import (
     mhc_rms_norm,
 )
 from flaggems_vllm.ops.paged_mqa import paged_mqa_logits
+from flaggems_vllm.ops.top_k_top_p import apply_top_k_top_p
 from flaggems_vllm.ops.topk_sigmoid import topk_sigmoid
 from flaggems_vllm.ops.vit_attention import (
     vision_flash_attn_varlen,
@@ -215,6 +216,7 @@ from flaggems_vllm.ops.vit_attention import (
 )
 
 __all__ = [
+    "apply_top_k_top_p",
     "act_quant_triton",
     "add_rms_norm",
     "apply_repetition_penalties",

@@ -229,3 +229,9 @@ If a model and vLLM runtime are available, run a small vLLM offline inference fr
 - Full benchmark runs can take a long time and should be reserved for performance validation.
 
 This project is licensed under the [Apache (version 2.0) License](./LICENSE).
+
+### Fixed MetaX Qwen3.8 composition
+
+The [C550 interface guide](docs/metax_fixed_composition.md) describes the fixed
+operator composition used by vllm-plugin-FL #635. Use its exact dependency lock;
+MetaX-only interfaces do not add support on other vendors.
