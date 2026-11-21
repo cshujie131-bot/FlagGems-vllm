@@ -44,5 +44,7 @@ for _alias, _target in _COMPAT_OP_ALIASES.items():
         globals()[_alias] = globals()[_target]
 
 __all__ = [
+    "is_paged_prefix_window_attention_available",
+    "paged_prefix_window_attention",
     "SUPPORTED_FP8_DTYPE",
 ]
